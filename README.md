@@ -1,5 +1,7 @@
 # PulseDM
 
+[![Download PulseDM v1.0.0](https://img.shields.io/badge/Download-v1.0.0-4f8cff?style=for-the-badge)](https://github.com/ialjbori6-cloud/pulse-dm/releases/latest)
+
 A working Internet Download Manager–style app for Windows, macOS and Linux. It has a **real segmented download engine** (up to 16 parallel range connections), pause/resume, a queue, scheduler, speed limiting, a modern web interface, and a browser extension that captures links and browser downloads.
 
 Everything runs locally. No accounts, no cloud, no telemetry, no npm dependencies.
