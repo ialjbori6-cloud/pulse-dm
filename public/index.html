@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>PulseDM — Download Manager</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v11" />
+              <path d="m7.5 9.5 4.5 4.5 4.5-4.5" />
+              <path d="M5 19h14" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>Pulse<span>DM</span></h1>
+            <p>Smart download manager</p>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Download filters">
+          <p class="nav-label">Library</p>
+          <button class="nav-item active" data-filter="all">
+            <span class="nav-icon" data-icon="grid"></span>
+            <span class="nav-text">All downloads</span>
+            <span class="count" data-count="all">0</span>
+          </button>
+          <button class="nav-item" data-filter="active">
+            <span class="nav-icon" data-icon="bolt"></span>
+            <span class="nav-text">In progress</span>
+            <span class="count" data-count="active">0</span>
+          </button>
+          <button class="nav-item" data-filter="unfinished">
+            <span class="nav-icon" data-icon="clock"></span>
+            <span class="nav-text">Unfinished</span>
+            <span class="count" data-count="unfinished">0</span>
+          </button>
+          <button class="nav-item" data-filter="finished">
+            <span class="nav-icon" data-icon="check"></span>
+            <span class="nav-text">Finished</span>
+            <span class="count" data-count="finished">0</span>
+          </button>
+
+          <p class="nav-label">Categories</p>
+          <button class="nav-item" data-filter="video">
+            <span class="nav-icon cat-video" data-icon="video"></span>
+            <span class="nav-text">Video</span>
+            <span class="count" data-count="video">0</span>
+          </button>
+          <button class="nav-item" data-filter="audio">
+            <span class="nav-icon cat-audio" data-icon="audio"></span>
+            <span class="nav-text">Music</span>
+            <span class="count" data-count="audio">0</span>
+          </button>
+          <button class="nav-item" data-filter="document">
+            <span class="nav-icon cat-document" data-icon="document"></span>
+            <span class="nav-text">Documents</span>
+            <span class="count" data-count="document">0</span>
+          </button>
+          <button class="nav-item" data-filter="app">
+            <span class="nav-icon cat-app" data-icon="app"></span>
+            <span class="nav-text">Programs</span>
+            <span class="count" data-count="app">0</span>
+          </button>
+          <button class="nav-item" data-filter="archive">
+            <span class="nav-icon cat-archive" data-icon="archive"></span>
+            <span class="nav-text">Compressed</span>
+            <span class="count" data-count="archive">0</span>
+          </button>
+          <button class="nav-item" data-filter="image">
+            <span class="nav-icon cat-image" data-icon="image"></span>
+            <span class="nav-text">Images</span>
+            <span class="count" data-count="image">0</span>
+          </button>
+          <button class="nav-item" data-filter="other">
+            <span class="nav-icon cat-other" data-icon="file"></span>
+            <span class="nav-text">Other</span>
+            <span class="count" data-count="other">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="pulse-card">
+            <div class="pulse-card-head">
+              <span>Live throughput</span>
+              <strong id="side-speed">0 B/s</strong>
+            </div>
+            <canvas id="sparkline" height="54" aria-hidden="true"></canvas>
+            <div class="pulse-card-foot">
+              <span id="side-state">Idle</span>
+              <span id="side-total">0 B downloaded</span>
+            </div>
+          </div>
+          <button class="folder-card" id="open-folder" title="Open save folder">
+            <span class="folder-ico" data-icon="folder"></span>
+            <span class="folder-txt">
+              <small>Save location</small>
+              <span id="folder-path">…</span>
+            </span>
+            <span class="folder-open" data-icon="external"></span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-btn menu-btn" id="menu-btn" aria-label="Toggle sidebar">
+            <span data-icon="menu"></span>
+          </button>
+          <div class="view-title">
+            <h2 id="view-title">All downloads</h2>
+            <p id="view-sub">Everything you have queued</p>
+          </div>
+          <div class="search">
+            <span data-icon="search"></span>
+            <input id="search" type="search" placeholder="Search by name or link" spellcheck="false" />
+          </div>
+          <div class="top-actions">
+            <button class="btn ghost hide-sm" id="pause-all">Pause all</button>
+            <button class="icon-btn hide-sm" id="clear-completed" aria-label="Clear finished downloads" title="Clear finished">
+              <span data-icon="trash"></span>
+            </button>
+            <button class="icon-btn" id="settings-btn" aria-label="Settings">
+              <span data-icon="settings"></span>
+            </button>
+            <button class="btn primary" id="add-btn">
+              <span data-icon="plus"></span> New download
+            </button>
+          </div>
+        </header>
+
+        <section class="hero" aria-label="Download overview">
+          <div class="hero-main">
+            <span class="eyebrow">Total transfer speed</span>
+            <div class="hero-speed">
+              <strong id="hero-speed">0 B/s</strong>
+              <span class="trend" id="hero-trend">idle</span>
+            </div>
+            <div class="hero-bar"><span id="hero-fill"></span></div>
+          </div>
+          <div class="hero-stats">
+            <div class="stat">
+              <span>Active</span>
+              <strong id="stat-active">0</strong>
+            </div>
+            <div class="stat">
+              <span>Queued</span>
+              <strong id="stat-queued">0</strong>
+            </div>
+            <div class="stat">
+              <span>Completed</span>
+              <strong id="stat-completed">0</strong>
+            </div>
+            <div class="stat">
+              <span>Downloaded</span>
+              <strong id="stat-total">0 B</strong>
+            </div>
+          </div>
+        </section>
+
+        <div class="banner" id="scheduler-banner" hidden>
+          <span class="banner-dot"></span>
+          <span id="banner-text">Scheduler is holding the queue.</span>
+          <button class="btn tiny ghost" id="banner-action">Resume now</button>
+        </div>
+
+        <section class="queue" aria-label="Downloads">
+          <div class="queue-head">
+            <span>File</span>
+            <span>Status</span>
+            <span class="hide-md">Size</span>
+            <span>Progress</span>
+            <span>Speed</span>
+            <span class="sr-only">Actions</span>
+          </div>
+          <div class="queue-body" id="list"></div>
+          <div class="empty" id="empty">
+            <div class="empty-art" aria-hidden="true">
+              <div class="empty-ring"></div>
+              <span data-icon="download"></span>
+            </div>
+            <h3>Nothing in the queue</h3>
+            <p>Drop a link anywhere on this page, or paste one and PulseDM will split it into parallel connections.</p>
+            <button class="btn primary" id="empty-add">
+              <span data-icon="plus"></span> Add your first download
+            </button>
+            <span class="empty-hint">Supports HTTP, HTTPS, resume and 16 connections per file</span>
+          </div>
+        </section>
+
+        <footer class="statusbar">
+          <span class="status-left"><span class="dot" id="conn-dot"></span><span id="status-left">Connecting to engine…</span></span>
+          <span id="status-mid" class="status-mid"></span>
+          <span class="status-right">PulseDM 1.0 <span class="sep">·</span> local engine</span>
+        </footer>
+      </main>
+    </div>
+
+    <aside class="drawer" id="drawer" hidden aria-label="Download details"></aside>
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+
+    <dialog class="modal" id="add-dialog">
+      <form id="add-form" method="dialog" novalidate>
+        <header class="modal-head">
+          <div>
+            <h3>New download</h3>
+            <p>PulseDM fetches the file in parallel pieces and resumes anywhere.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close aria-label="Close">
+            <span data-icon="close"></span>
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <label class="field">
+            <span>Download link</span>
+            <div class="input-row">
+              <div class="input-wrap">
+                <span data-icon="link"></span>
+                <input id="add-url" type="url" placeholder="https://example.com/archive.zip" autocomplete="off" spellcheck="false" required />
+              </div>
+              <button type="button" class="btn ghost" id="fetch-info">Check link</button>
+            </div>
+          </label>
+
+          <div class="probe" id="probe-info" hidden>
+            <span class="probe-ico" data-icon="bolt"></span>
+            <div class="probe-txt">
+              <strong id="probe-name">—</strong>
+              <span id="probe-meta">—</span>
+            </div>
+            <span class="badge" id="probe-badge">Multi-connection</span>
+          </div>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>File name</span>
+              <input id="add-name" placeholder="Automatic from server" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Connections</span>
+              <select id="add-connections"></select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>Save to</span>
+            <div class="input-row">
+              <div class="input-wrap">
+                <span data-icon="folder"></span>
+                <input id="add-dir" autocomplete="off" spellcheck="false" />
+              </div>
+              <button type="button" class="btn ghost" id="browse-dir">Browse</button>
+            </div>
+          </label>
+
+          <label class="check">
+            <input type="checkbox" id="add-schedule" />
+            <span>Start later</span>
+            <input type="datetime-local" id="add-start-at" hidden />
+          </label>
+
+          <p class="form-error" id="add-error" hidden></p>
+        </div>
+
+        <footer class="modal-foot">
+          <button type="button" class="btn ghost" data-close>Cancel</button>
+          <button type="submit" class="btn primary" id="add-submit">
+            <span data-icon="download"></span> Start download
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="settings-dialog">
+      <form id="settings-form" method="dialog" novalidate>
+        <header class="modal-head">
+          <div>
+            <h3>Settings</h3>
+            <p>Tune the engine, destination folder and automated schedule.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close aria-label="Close">
+            <span data-icon="close"></span>
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <p class="section-label">Downloads</p>
+          <label class="field">
+            <span>Default save folder</span>
+            <div class="input-row">
+              <div class="input-wrap">
+                <span data-icon="folder"></span>
+                <input id="set-dir" autocomplete="off" spellcheck="false" />
+              </div>
+              <button type="button" class="btn ghost" id="set-browse">Browse</button>
+            </div>
+          </label>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Simultaneous downloads</span>
+              <select id="set-concurrent"></select>
+            </label>
+            <label class="field">
+              <span>Connections per file</span>
+              <select id="set-connections"></select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>Speed limit</span>
+            <select id="set-limit">
+              <option value="0">Unlimited</option>
+              <option value="1048576">1 MB/s</option>
+              <option value="2097152">2 MB/s</option>
+              <option value="5242880">5 MB/s</option>
+              <option value="10485760">10 MB/s</option>
+              <option value="26214400">25 MB/s</option>
+              <option value="52428800">50 MB/s</option>
+            </select>
+          </label>
+
+          <p class="section-label">Automation</p>
+          <label class="check switch-row">
+            <input type="checkbox" id="set-schedule" />
+            <span>Only download inside a schedule window</span>
+          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Start time</span>
+              <input type="time" id="set-start" value="01:00" />
+            </label>
+            <label class="field">
+              <span>Stop time</span>
+              <input type="time" id="set-stop" value="07:00" />
+            </label>
+          </div>
+
+          <label class="check switch-row">
+            <input type="checkbox" id="set-clipboard" />
+            <span>Offer to download links I paste</span>
+          </label>
+
+          <p class="section-label">Appearance</p>
+          <div class="theme-row">
+            <button type="button" class="theme-choice active" data-theme-choice="dark">
+              <span class="swatch dark"></span> Dark
+            </button>
+            <button type="button" class="theme-choice" data-theme-choice="light">
+              <span class="swatch light"></span> Light
+            </button>
+          </div>
+        </div>
+
+        <footer class="modal-foot">
+          <span class="engine-note" id="engine-note">Engine ready</span>
+          <button type="button" class="btn ghost" data-close>Cancel</button>
+          <button type="submit" class="btn primary">Save settings</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <div class="drop-overlay" id="drop-overlay" hidden>
+      <div class="drop-inner">
+        <span data-icon="download"></span>
+        <strong>Drop links to download</strong>
+        <span>Release anywhere and PulseDM takes over.</span>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
