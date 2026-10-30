@@ -1,0 +1,16 @@
+{
+  "name": "pulse-dm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PulseDM - a fast segmented download manager with a local web UI and browser extension",
+  "scripts": {
+    "start": "node server/index.js --open",
+    "serve": "node server/index.js",
+    "test": "node tools/selftest.mjs",
+    "icons": "node tools/make-icons.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
