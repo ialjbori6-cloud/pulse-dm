@@ -1,0 +1,4 @@
+node_modules/
+data/
+*.pulsesave
+.DS_Store
