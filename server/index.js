@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { DownloadManager, defaultSettings } from './manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -99,40 +99,67 @@ function broadcastState() {
   }
 }
 
-function openExternal(target) {
+const exists = (target) => fs.access(target).then(() => true).catch(() => false);
+
+/** Launch a detached process and report whether it started. */
+function launch(command, args, options = {}) {
   return new Promise((resolve) => {
-    if (!target) return resolve(false);
-    const platform = process.platform;
     try {
-      if (platform === 'win32') {
-        execFile('explorer.exe', [target], { windowsHide: true }, () => resolve(true));
-      } else if (platform === 'darwin') {
-        execFile('open', [target], () => resolve(true));
-      } else {
-        execFile('xdg-open', [target], () => resolve(true));
-      }
+      const child = spawn(command, args, {
+        windowsHide: true,
+        detached: true,
+        stdio: 'ignore',
+        ...options,
+      });
+      child.on('error', () => resolve(false));
+      child.unref();
+      resolve(true);
     } catch {
       resolve(false);
     }
   });
 }
 
-function revealInFolder(target) {
-  return new Promise((resolve) => {
-    if (!target) return resolve(false);
-    const platform = process.platform;
-    try {
-      if (platform === 'win32') {
-        execFile('explorer.exe', [`/select,${target}`], { windowsHide: true }, () => resolve(true));
-      } else if (platform === 'darwin') {
-        execFile('open', ['-R', target], () => resolve(true));
-      } else {
-        execFile('xdg-open', [path.dirname(target)], () => resolve(true));
-      }
-    } catch {
-      resolve(false);
-    }
-  });
+async function openExternal(target) {
+  if (!target) return false;
+  const platform = process.platform;
+  if (platform === 'win32') return launch('explorer.exe', [target]);
+  if (platform === 'darwin') return launch('open', [target]);
+  return launch('xdg-open', [target]);
+}
+
+/**
+ * Show a file in its folder (selected when possible).
+ *
+ * On Windows the whole thing is one raw command line: explorer.exe
+ * /select,"C:\path with spaces\file.mp4". execFile/spawn would add their own
+ * quoting around `/select,<path>`, which makes Explorer parse the switch
+ * wrongly and silently open Documents instead — so the argument is built by
+ * hand with windowsVerbatimArguments.
+ */
+async function revealInFolder(target) {
+  if (!target) return { ok: false, error: 'Nothing to show' };
+  const platform = process.platform;
+  const stat = await fs.stat(target).catch(() => null);
+  const isFile = !!stat && !stat.isDirectory();
+  const folder = stat && stat.isDirectory() ? target : path.dirname(target);
+
+  // A finished file that was moved/deleted still reveals its folder.
+  if (!stat && !(await exists(folder))) {
+    return { ok: false, error: 'That file is no longer on disk' };
+  }
+
+  let started;
+  if (platform === 'win32') {
+    const arg = isFile ? `/select,"${target.replace(/"/g, '')}"` : folder;
+    started = await launch('explorer.exe', [arg], { windowsVerbatimArguments: true });
+  } else if (platform === 'darwin') {
+    started = await launch('open', isFile ? ['-R', target] : [folder]);
+  } else {
+    started = await launch('xdg-open', [folder]);
+  }
+
+  return started ? { ok: true } : { ok: false, error: 'Could not open the file manager' };
 }
 
 function pickFolder() {
@@ -303,13 +330,19 @@ async function handleApi(req, res, url) {
       if (item.status !== 'completed' || !item.savePath) {
         return sendError(res, new Error('This file is not finished yet'), 400);
       }
-      await openExternal(item.savePath);
+      if (!(await exists(item.savePath))) {
+        return sendError(res, new Error('That file is no longer on disk — use “Show in folder”'), 404);
+      }
+      if (!(await openExternal(item.savePath))) {
+        return sendError(res, new Error('Could not open the file'), 500);
+      }
       return sendJson(res, { ok: true });
     }
     if (action === 'reveal' && method === 'POST') {
       const target =
         item.status === 'completed' && item.savePath ? item.savePath : item.dir || manager.settings.defaultDir;
-      await revealInFolder(target);
+      const result = await revealInFolder(target);
+      if (!result.ok) return sendError(res, new Error(result.error), 404);
       return sendJson(res, { ok: true });
     }
     return sendError(res, new Error('Unsupported action'), 405);
@@ -317,7 +350,9 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/open-folder' && method === 'POST') {
     const body = await readBody(req);
-    await openExternal(body.dir || manager.settings.defaultDir);
+    const dir = body.dir || manager.settings.defaultDir;
+    const result = await revealInFolder(dir);
+    if (!result.ok) return sendError(res, new Error(result.error), 404);
     return sendJson(res, { ok: true });
   }
 
