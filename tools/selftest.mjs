@@ -1,4 +1,4 @@
-/**
+﻿/**
  * PulseDM engine self-test.
  *
  * Spins up a local HTTP server that supports byte ranges, then exercises the
@@ -19,6 +19,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { DownloadManager } from '../server/manager.js';
+import { isVideoUrl, selectFormats } from '../server/video.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const results = [];
@@ -236,6 +237,36 @@ async function main() {
     check('settings survive a restart', restored.settings.maxConcurrent === 1, String(restored.settings.maxConcurrent));
     check('paused state survives a restart', restoredItem?.status === 'paused', restoredItem?.status);
     await restored.close();
+
+    console.log('\n7) Video link handling');
+    check(
+      'a YouTube watch page is treated as a video',
+      isVideoUrl('https://www.youtube.com/watch?v=lDXk78aUgc0'),
+    );
+    check(
+      'a direct MP4 link stays on the segmented engine',
+      !isVideoUrl('https://example.com/media/sample-video.mp4'),
+    );
+    const formats = {
+      language: 'en',
+      formats: [
+        { format_id: '137', ext: 'mp4', height: 1080, fps: 30, vcodec: 'avc1.640028', acodec: 'none', filesize: 50_000_000, tbr: 4000, protocol: 'https', url: 'https://example.com/v' },
+        { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.2', abr: 128, filesize: 2_000_000, protocol: 'https', url: 'https://example.com/a' },
+        { format_id: '18', ext: 'mp4', height: 360, fps: 30, vcodec: 'avc1.42001E', acodec: 'mp4a.40.2', filesize: 10_000_000, tbr: 500, protocol: 'https', url: 'https://example.com/c' },
+      ],
+    };
+    const merged = selectFormats(formats, { canMerge: true });
+    check(
+      'best quality is merged from video + audio',
+      merged.mode === 'merge' && merged.selector === '137+140' && merged.size === 52_000_000,
+      `${merged.selector} · ${merged.size} bytes`,
+    );
+    const single = selectFormats(formats, { canMerge: false });
+    check(
+      'progressive stream is used when merging is unavailable',
+      single.mode === 'single' && single.selector === '18',
+      single.selector,
+    );
   } finally {
     server.close();
     await manager.close().catch(() => {});
