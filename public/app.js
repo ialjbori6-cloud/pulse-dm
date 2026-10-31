@@ -175,6 +175,16 @@ function formatDate(timestamp) {
   });
 }
 
+function formatDuration(total) {
+  const seconds = Math.max(0, Math.round(Number(total) || 0));
+  if (!seconds) return '—';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 function hostOf(rawUrl) {
   try {
     return new URL(rawUrl).hostname.replace(/^www\./i, '');
@@ -199,6 +209,9 @@ function progressText(item) {
 }
 
 function subtitleText(item) {
+  if (item.note && (item.status === 'starting' || item.status === 'downloading')) {
+    return item.note;
+  }
   switch (item.status) {
     case 'completed':
       return `${formatBytes(item.size)} saved ${timeAgo(item.completedAt)}`;
@@ -629,7 +642,8 @@ function updateRow(row, item) {
 
   const host = $('.file-host', row);
   const parts = item.resumable && item.connections > 1 ? item.connections : 1;
-  host.innerHTML = `<span>${escapeHtml(hostOf(item.finalUrl || item.url))}</span><span class="tag">${parts}×</span>`;
+  const tag = item.kind === 'video' ? 'video' : `${parts}×`;
+  host.innerHTML = `<span>${escapeHtml(hostOf(item.finalUrl || item.url))}</span><span class="tag">${tag}</span>`;
 
   const pill = $('.pill', row);
   pill.className = `pill ${item.status}`;
@@ -637,7 +651,11 @@ function updateRow(row, item) {
   pill.title = item.error || '';
 
   $('.size-main', row).textContent = item.size ? formatBytes(item.size) : '—';
-  $('.size-sub', row).textContent = item.size ? `${numberFmt.format(item.size)} B` : 'unknown size';
+  $('.size-sub', row).textContent = item.size
+    ? `${numberFmt.format(item.size)} B`
+    : item.kind === 'video'
+      ? (item.formatLabel || 'reading video…')
+      : 'size unknown';
 
   const pct = percentOf(item);
   $('.bar-fill', row).style.width = `${item.status === 'completed' ? 100 : pct}%`;
@@ -793,15 +811,34 @@ function renderDrawer() {
 
   const meta = [
     ['Status', statusLabel(item)],
-    ['Size', item.size ? `${formatBytes(item.size)} (${numberFmt.format(item.size)} bytes)` : 'Unknown'],
+    [
+      'Size',
+      item.size
+        ? `${formatBytes(item.size)} (${numberFmt.format(item.size)} bytes)`
+        : item.kind === 'video'
+          ? 'Reading video…'
+          : 'Unknown',
+    ],
     ['Downloaded', formatBytes(item.received)],
     ['Speed', item.status === 'downloading' ? formatSpeed(item.speed) : '—'],
     ['Time left', eta],
-    ['Connections', item.resumable ? `${item.connections} parallel · resumable` : 'Single stream'],
+    [
+      'Connections',
+      item.kind === 'video'
+        ? 'Video engine (yt-dlp)'
+        : item.resumable
+          ? `${item.connections} parallel · resumable`
+          : 'Single stream',
+    ],
     ['Category', item.category],
     ['Started', formatDate(item.startedAt)],
     ['Finished', item.status === 'completed' ? formatDate(item.completedAt) : '—'],
   ];
+  if (item.kind === 'video') {
+    meta.splice(5, 0, ['Quality', item.formatLabel || 'Auto']);
+    meta.splice(6, 0, ['Resolution', item.height ? `${item.height}p` : 'Auto']);
+    meta.splice(7, 0, ['Duration', formatDuration(item.duration)]);
+  }
   if (item.error) meta.push(['Error', item.error]);
 
   els.drawer.innerHTML = `
@@ -822,11 +859,24 @@ function renderDrawer() {
         </div>
       </div>
       <div class="drawer-actions">${drawerActions(item)}</div>
-      <section class="drawer-section">
+      ${
+        item.kind === 'video'
+          ? `<section class="drawer-section">
+        <h4>Video stream</h4>
+        <div class="meta-list">
+          <div class="meta-row"><span>Quality</span><strong>${escapeHtml(item.formatLabel || 'Auto')}</strong></div>
+          <div class="meta-row"><span>Resolution</span><strong>${item.height ? `${item.height}p` : 'Auto'}</strong></div>
+          <div class="meta-row"><span>Duration</span><strong>${formatDuration(item.duration)}</strong></div>
+          <div class="meta-row"><span>Engine</span><strong>yt-dlp · resumable</strong></div>
+        </div>
+        <div class="chunk-legend"><span>Audio and video are fetched separately and merged into one file.</span></div>
+      </section>`
+          : `<section class="drawer-section">
         <h4>Connection map</h4>
         <div class="chunk-grid">${cells}</div>
         <div class="chunk-legend"><span>${item.chunkCount || 0} parts</span><span>${item.resumable ? 'Range requests enabled' : 'Sequential stream'}</span></div>
-      </section>
+      </section>`
+      }
       <section class="drawer-section">
         <h4>Details</h4>
         <div class="meta-list">
@@ -957,7 +1007,7 @@ async function probeCurrentUrl() {
   }
   const token = ++state.probeToken;
   $('#probe-name').textContent = 'Checking link…';
-  $('#probe-meta').textContent = 'Reading headers and file size';
+  $('#probe-meta').textContent = 'Reading the link and its streams';
   const badge = $('#probe-badge');
   badge.textContent = 'Checking';
   badge.className = 'badge single';
@@ -965,11 +1015,24 @@ async function probeCurrentUrl() {
   try {
     const meta = await api('/probe', { method: 'POST', body: JSON.stringify({ url }) });
     if (token !== state.probeToken) return;
-    $('#probe-name').textContent = meta.filename;
-    $('#probe-meta').textContent = `${meta.size ? formatBytes(meta.size) : 'Unknown size'} · ${meta.contentType || 'unknown type'}`;
-    badge.textContent = meta.resumable ? 'Multi-connection' : 'Single stream';
-    badge.className = `badge${meta.resumable ? '' : ' single'}`;
-    if (!$('#add-name').value.trim()) $('#add-name').value = meta.filename;
+    if (meta.video) {
+      $('#probe-name').textContent = meta.title || meta.filename;
+      const bits = [
+        meta.formatLabel,
+        meta.size ? formatBytes(meta.size) : 'size calculated while downloading',
+        meta.duration ? formatDuration(meta.duration) : '',
+      ].filter(Boolean);
+      $('#probe-meta').textContent = bits.join(' · ');
+      badge.textContent = meta.height ? `Video ${meta.height}p` : 'Video';
+      badge.className = 'badge';
+      if (!$('#add-name').value.trim()) $('#add-name').value = meta.filename;
+    } else {
+      $('#probe-name').textContent = meta.filename;
+      $('#probe-meta').textContent = `${meta.size ? formatBytes(meta.size) : 'Size unknown'} · ${meta.contentType || 'unknown type'}`;
+      badge.textContent = meta.resumable ? 'Multi-connection' : 'Single stream';
+      badge.className = `badge${meta.resumable ? '' : ' single'}`;
+      if (!$('#add-name').value.trim()) $('#add-name').value = meta.filename;
+    }
   } catch (error) {
     if (token !== state.probeToken) return;
     info.hidden = false;
