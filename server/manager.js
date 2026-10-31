@@ -1,6 +1,7 @@
 import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { Readable } from 'node:stream';
@@ -14,6 +15,17 @@ import {
   normalizeUrl,
   timeInWindow,
 } from './utils.js';
+import {
+  isVideoUrl,
+  probeVideo,
+  ensureYtdlp,
+  ensureFfmpeg,
+  findFfmpeg,
+  installNote,
+  friendlyVideoError,
+  killTree,
+  buildDownloadArgs,
+} from './video.js';
 
 const TICK_MS = 1000;
 const SAVE_INTERVAL = 4000;
@@ -138,6 +150,11 @@ function publicItem(item) {
     connections: item.connections,
     category: item.category,
     contentType: item.contentType || '',
+    kind: item.kind || 'file',
+    note: item.note || '',
+    height: item.height || 0,
+    duration: item.duration || 0,
+    formatLabel: item.formatLabel || '',
     createdAt: item.createdAt,
     startedAt: item.startedAt || 0,
     completedAt: item.completedAt || 0,
@@ -165,6 +182,7 @@ export class DownloadManager extends EventEmitter {
     this._lastSave = 0;
     this._saving = null;
     this._saveQueued = false;
+    this._probeCache = new Map();
   }
 
   async init() {
@@ -197,6 +215,8 @@ export class DownloadManager extends EventEmitter {
           item.chunks = Array.isArray(item.chunks)
             ? item.chunks.map((chunk) => ({ ...chunk, busy: false }))
             : [];
+          if (!item.kind) item.kind = 'file';
+          item.note = '';
           if (!item.dir) item.dir = this.settings.defaultDir;
           if (!item.category) item.category = categorize(item.filename);
           return item;
@@ -227,6 +247,13 @@ export class DownloadManager extends EventEmitter {
       chunks: item.chunks || [],
       category: item.category,
       contentType: item.contentType || '',
+      kind: item.kind || 'file',
+      height: item.height || 0,
+      duration: item.duration || 0,
+      formatLabel: item.formatLabel || '',
+      videoSelector: item.videoSelector || '',
+      videoExt: item.videoExt || '',
+      videoStem: item.videoStem || '',
       createdAt: item.createdAt,
       startedAt: item.startedAt || 0,
       completedAt: item.completedAt || 0,
@@ -335,6 +362,21 @@ export class DownloadManager extends EventEmitter {
 
   async probe(rawUrl, outerSignal) {
     const url = normalizeUrl(rawUrl);
+    if (isVideoUrl(url)) {
+      const cached = this._probeCache.get(url);
+      if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.meta;
+      const ffmpeg = await findFfmpeg();
+      const meta = await probeVideo(url, {
+        canMerge: !!ffmpeg || process.platform === 'win32',
+        signal: outerSignal,
+      });
+      this._probeCache.set(url, { at: Date.now(), meta });
+      if (this._probeCache.size > 40) {
+        const oldest = [...this._probeCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) this._probeCache.delete(oldest[0]);
+      }
+      return meta;
+    }
     const controller = new AbortController();
     const abort = () => controller.abort();
     if (outerSignal) {
@@ -392,9 +434,19 @@ export class DownloadManager extends EventEmitter {
     const normalized = normalizeUrl(url);
     const saveDir = path.resolve(String(dir || this.settings.defaultDir));
     await fs.mkdir(saveDir, { recursive: true }).catch(() => {});
+    const kind = isVideoUrl(normalized) ? 'video' : 'file';
+    let meta = null;
+    if (kind === 'video') {
+      try {
+        meta = await this.probe(normalized);
+      } catch {
+        // Added anyway: the row shows the real error once it starts.
+        meta = null;
+      }
+    }
     const provided = filename ? sanitizeFilename(filename) : '';
-    const guessed = filenameFromUrl(normalized);
-    const wanted = provided || guessed;
+    const guessed = kind === 'video' ? '' : filenameFromUrl(normalized);
+    const wanted = provided || meta?.filename || guessed;
     const item = {
       id: randomUUID(),
       url: normalized,
@@ -404,21 +456,29 @@ export class DownloadManager extends EventEmitter {
       dir: saveDir,
       savePath: '',
       partPath: '',
-      size: 0,
+      size: meta?.size || 0,
       received: 0,
       status: 'queued',
-      resumable: true,
+      resumable: kind === 'file',
       connections: clamp(Number(connections) || this.settings.defaultConnections, 1, 16),
       chunks: [],
-      category: categorize(wanted || normalized),
-      contentType: '',
+      category: kind === 'video' ? 'video' : categorize(wanted || normalized),
+      contentType: meta?.contentType || '',
+      kind,
+      note: '',
+      height: meta?.height || 0,
+      duration: meta?.duration || 0,
+      formatLabel: meta?.formatLabel || '',
+      videoSelector: meta?.formatSelector || '',
+      videoExt: meta?.ext || '',
+      videoStem: '',
       createdAt: Date.now(),
       startedAt: 0,
       completedAt: 0,
       startAt: Number(startAt) || 0,
       error: '',
       speed: 0,
-      probed: false,
+      probed: !!meta,
       autoPaused: false,
     };
     if (item.startAt && item.startAt > Date.now() + 1000) item.status = 'scheduled';
@@ -477,6 +537,10 @@ export class DownloadManager extends EventEmitter {
   async #run(item, controller) {
     const signal = controller.signal;
     try {
+      if ((item.kind || 'file') === 'video') {
+        await this.#runVideo(item, controller);
+        return;
+      }
       if (!item.probed || !item.savePath) {
         const meta = await this.probe(item.url, signal);
         if (signal.aborted) return;
@@ -730,6 +794,248 @@ export class DownloadManager extends EventEmitter {
     this.emit('change');
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Video downloads (yt-dlp)                                            */
+  /* ------------------------------------------------------------------ */
+
+  async #runVideo(item, controller) {
+    const signal = controller.signal;
+    item.status = 'starting';
+    item.error = '';
+    item.note = 'Preparing video engine…';
+    item.chunks = [];
+    this.emit('change');
+
+    const status = (info) => {
+      if (signal.aborted) return;
+      item.note = typeof info === 'string' ? info : installNote(info);
+      this.emit('change');
+    };
+
+    const ytdlp = await ensureYtdlp(status);
+    if (signal.aborted) return;
+
+    if (!item.videoSelector || !item.filename || !item.size) {
+      status('Reading video info…');
+      const meta = await this.probe(item.url, signal);
+      if (signal.aborted) return;
+      if (!item.nameLocked) item.filename = meta.filename;
+      item.size = meta.size || item.size;
+      item.height = meta.height || item.height;
+      item.duration = meta.duration || item.duration;
+      item.formatLabel = meta.formatLabel || item.formatLabel;
+      item.videoSelector = meta.formatSelector || item.videoSelector;
+      item.videoExt = meta.ext || item.videoExt;
+      item.contentType = meta.contentType || item.contentType;
+      item.finalUrl = meta.finalUrl || item.url;
+      this.emit('change');
+    }
+
+    item.category = 'video';
+    const ext = item.videoExt || 'mp4';
+    let ffmpeg = null;
+    if (/\+/.test(String(item.videoSelector || ''))) {
+      status('Checking the merge tool…');
+      ffmpeg = await ensureFfmpeg(status);
+      if (signal.aborted) return;
+    } else {
+      ffmpeg = await findFfmpeg();
+    }
+
+    await fs.mkdir(item.dir, { recursive: true });
+    if (!item.savePath || !item.videoStem) {
+      const currentExt = path.extname(item.filename || '').toLowerCase();
+      const rawStem = currentExt ? item.filename.slice(0, -currentExt.length) : item.filename;
+      const stem = sanitizeFilename(rawStem || 'video', 'video');
+      item.savePath = await uniquePath(path.join(item.dir, `${stem}.${ext}`));
+      item.videoStem = path.basename(item.savePath, path.extname(item.savePath));
+    }
+    item.filename = path.basename(item.savePath);
+    item.videoTemp = path.join(item.dir, `${item.videoStem}.pdm-tmp`);
+    item.partPath = `${item.savePath}.part`;
+    item.note = 'Starting download…';
+    item.status = 'downloading';
+    if (!item.startedAt) item.startedAt = Date.now();
+    item.speedLimit = this.settings.speedLimit;
+    item._lastBytes = item.received || 0;
+    item._lastTime = Date.now();
+    this.emit('change');
+
+    await this.#spawnVideo(item, controller, { ytdlp, ffmpeg, ext });
+    if (signal.aborted) return;
+
+    const finalPath = await this.#resolveVideoOutput(item);
+    const stat = await fs.stat(finalPath);
+    item.savePath = finalPath;
+    item.filename = path.basename(finalPath);
+    item.size = stat.size;
+    item.received = stat.size;
+    item.category = categorize(item.filename);
+    item.contentType = `video/${path.extname(finalPath).slice(1).toLowerCase() || 'mp4'}`;
+    item.status = 'completed';
+    item.completedAt = Date.now();
+    item.speed = 0;
+    item.note = '';
+    item.error = '';
+    item.chunks = [];
+    item.autoPaused = false;
+    item.partPath = '';
+    item.probed = true;
+    this.emit('change');
+  }
+
+  async #spawnVideo(item, controller, { ytdlp, ffmpeg, ext }) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const args = buildDownloadArgs(item, { ytdlp, ffmpeg, ext });
+      const child = spawn(ytdlp, args, { windowsHide: true });
+      item._child = child;
+      let stderr = '';
+      let pending = '';
+      let tail = '';
+      let phaseBase = 0;
+      let phaseTotal = 0;
+      let phases = 0;
+      let settled = false;
+      let settle;
+      const closed = new Promise((resolve) => {
+        settle = resolve;
+      });
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        settle(value);
+      };
+      const onAbort = () => {
+        killTree(child);
+        setTimeout(() => {
+          try {
+            child.stdout.destroy();
+            child.stderr.destroy();
+          } catch {
+            /* already closed */
+          }
+          finish(-1);
+        }, 6000);
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+
+      const handleLine = (raw) => {
+        const text = raw.trim();
+        if (!text) return;
+        if (text.startsWith('pdm:')) {
+          const [downloadedRaw, totalRaw, estimateRaw] = text.slice(4).split('|');
+          const downloaded = Math.max(0, Number(downloadedRaw) || 0);
+          const total = Number(totalRaw) || Number(estimateRaw) || 0;
+          // HLS reports a growing estimate, so only trust explicit download
+          // phases (Destination lines) when deciding where a phase starts.
+          if (total) phaseTotal = total;
+          item.received = phaseBase + downloaded;
+          if (total) item.size = Math.max(item.size || 0, phaseBase + total);
+          return;
+        }
+        if (/\[download\]\s+Destination:/i.test(text)) {
+          if (phaseTotal) {
+            phaseBase += phaseTotal;
+            phaseTotal = 0;
+          }
+          phases += 1;
+          const next = phases === 1 ? 'Downloading video stream…' : 'Downloading audio stream…';
+          if (item.note !== next) {
+            item.note = next;
+            this.emit('change');
+          }
+          return;
+        }
+        if (/\[Merger\]|Merging formats/i.test(text)) {
+          item.note = 'Merging audio and video…';
+          if (item.size) item.received = item.size;
+          this.emit('change');
+          return;
+        }
+        if (/\[(Fixup|VideoConvertor|Metadata|EmbedThumbnail|ExtractAudio)/i.test(text)) {
+          item.note = 'Finishing video…';
+          if (item.size) item.received = item.size;
+          this.emit('change');
+        }
+      };
+
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        tail = (tail + chunk).slice(-8000);
+        pending += chunk;
+        let index;
+        while ((index = pending.indexOf('\n')) >= 0) {
+          handleLine(pending.slice(0, index));
+          pending = pending.slice(index + 1);
+        }
+        if (pending.length > 20000) pending = pending.slice(-2000);
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr = (stderr + chunk).slice(-16000);
+      });
+
+      const code = await new Promise((resolve) => {
+        child.on('error', (error) => {
+          stderr += `\n${error.message}`;
+          finish(-1);
+        });
+        child.on('exit', (value, signal) => finish(value ?? (signal ? -1 : 0)));
+        child.on('close', (value) => finish(value ?? -1));
+        closed.then(resolve);
+      });
+      controller.signal.removeEventListener('abort', onAbort);
+      item._child = null;
+
+      if (controller.signal.aborted || item.status === 'paused') return;
+      if (code === 0) return;
+
+      const formatGone = /requested format is not available|format is not available/i.test(stderr);
+      if (formatGone && attempt === 0) {
+        item.videoSelector = '';
+        item.note = 'Retrying with the best available quality…';
+        item.received = 0;
+        this.emit('change');
+        await this.#cleanVideoParts(item).catch(() => {});
+        continue;
+      }
+      throw new Error(friendlyVideoError(`${stderr}\n${tail}`));
+    }
+  }
+
+  async #resolveVideoOutput(item) {
+    const prefix = path.basename(item.videoTemp || `${item.videoStem}.pdm-tmp`);
+    const entries = await fs.readdir(item.dir, { withFileTypes: true });
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const name = entry.name;
+      if (!name.startsWith(`${prefix}.`)) continue;
+      if (/\.(part|ytdl|temp|download|json|description|vtt|srt|ass|jpg|jpeg|png|webp)$/i.test(name)) continue;
+      candidates.push(path.join(item.dir, name));
+    }
+    if (!candidates.length) throw new Error('The video finished but no output file was found.');
+    const stats = await Promise.all(
+      candidates.map(async (file) => ({ file, stat: await fs.stat(file) })),
+    );
+    stats.sort((a, b) => b.stat.size - a.stat.size);
+    const chosen = stats[0].file;
+    const ext = path.extname(chosen).slice(1) || 'mp4';
+    const finalPath = await uniquePath(path.join(item.dir, `${item.videoStem}.${ext}`));
+    await fs.rename(chosen, finalPath);
+    return finalPath;
+  }
+
+  async #cleanVideoParts(item) {
+    const stem = item.videoStem;
+    if (!stem) return;
+    const entries = await fs.readdir(item.dir).catch(() => []);
+    for (const name of entries) {
+      if (!name.startsWith(`${stem}.pdm-tmp.`)) continue;
+      await fs.unlink(path.join(item.dir, name)).catch(() => {});
+    }
+  }
+
   pause(id) {
     const item = this.get(id);
     if (!item) throw new Error('Download not found');
@@ -791,6 +1097,10 @@ export class DownloadManager extends EventEmitter {
     if (index === -1) return false;
     const item = this.items[index];
     if (item._abort) item._abort.abort();
+    if (item._child) killTree(item._child);
+    if (item._running && item._done) {
+      await Promise.race([item._done.catch(() => {}), sleep(8000)]);
+    }
     this.items.splice(index, 1);
     const targets = [];
     if (deleteFile) {
@@ -798,6 +1108,17 @@ export class DownloadManager extends EventEmitter {
       if (item.partPath) targets.push(item.partPath);
     } else if (item.status !== 'completed' && item.partPath) {
       targets.push(item.partPath);
+    }
+    if (item.kind === 'video' && item.videoStem) {
+      const entries = await fs.readdir(item.dir).catch(() => []);
+      for (const name of entries) {
+        if (!name.startsWith(`${item.videoStem}.`)) continue;
+        if (deleteFile || item.status !== 'completed') {
+          targets.push(path.join(item.dir, name));
+        } else if (/\.(part|ytdl|temp|download)$/i.test(name) || name.includes('.pdm-tmp.')) {
+          targets.push(path.join(item.dir, name));
+        }
+      }
     }
     for (const target of targets) {
       await fs.unlink(target).catch(() => {});
