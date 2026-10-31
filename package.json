@@ -1,6 +1,6 @@
 {
   "name": "pulse-dm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "PulseDM - a fast segmented download manager with a local web UI and browser extension",
