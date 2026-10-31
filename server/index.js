@@ -192,7 +192,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, {
       ok: true,
       app: 'PulseDM',
-      version: '1.0.0',
+      version: '1.0.1',
       port: PORT,
       uptime: Math.round(process.uptime()),
       platform: process.platform,
